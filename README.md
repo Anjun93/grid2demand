@@ -17,21 +17,21 @@ If you meet installation issues, please refer to the [user guide](https://github
 import grid2demand as gd
 
 "Step 1: Read Input Network Data"
-gd.ReadNetworkFiles('UMD_dataset')
+gd.ReadNetworkFiles()
 
 "Step 2: Partition Grid into cells"
-gd.PartitionGrid(number_of_x_blocks=None, number_of_y_blocks=None, cell_width=500, cell_height=500, latitude=30)
+gd.PartitionGrid(number_of_x_blocks=5, number_of_y_blocks=5, cell_width=None, cell_height=None, latitude=30)
 # users can customize number of grid cells or cell's width and height
 
 "Step 3: Get Production/Attraction Rates of Each Land Use Type with a Specific Trip Purpose"
-gd.GetPoiTripRate(trip_rate_folder=None, trip_purpose=1)
-# users can customize poi_trip_rate.csv and trip purpose
+gd.GetPoiTripRate(trip_purpose=1)
+# users can customize trip purpose and poi_trip_rate.csv
 
 "Step 4: Define Production/Attraction Value of Each Node According to POI Type"
 gd.GetNodeDemand()
 
 "Step 5: Calculate Zone-to-zone Accessibility Matrix by Centroid-to-centroid Straight Distance"
-gd.ProduceAccessMatrix(latitude=30, accessibility_folder=None)
+gd.ProduceAccessMatrix(latitude=30)
 # users can customize the latitude of the research area and accessibility.csv
 
 "Step 6: Apply Gravity Model to Conduct Trip Distribution"
