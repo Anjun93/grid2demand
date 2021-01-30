@@ -3,7 +3,7 @@
 ## Introduction
 Grid2demand is an open-source quick demand generation tool based on the trip generation and trip distribution methods of the standard 4-step travel model for teaching transportation planning and applications. By taking advantage of OSM2GMNS tool to obtain routable transportation network from OpenStreetMap, Grid2demand aims to further utilize Point of Interest (POI) data to construct trip demand matrix aligned with standard travel models.
 ## Quick Start
-Users can refer to the [template code and test data set](https://github.com/asu-trans-ai-lab/Grid2Demand/) to have a quick start.
+Users can refer to the [code template and test data set](https://github.com/asu-trans-ai-lab/Grid2Demand/) to have a quick start.
 
 ## Installation
 ```
