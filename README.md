@@ -32,7 +32,7 @@ gd.GetNodeDemand()
 
 "Step 5: Calculate Zone-to-zone Accessibility Matrix by Centroid-to-centroid Straight Distance"
 gd.ProduceAccessMatrix(latitude=30)
-# users can customize the latitude of the research area and accessibility.csv
+# users can customize the latitude of the area of interest and accessibility.csv
 
 "Step 6: Apply Gravity Model to Conduct Trip Distribution"
 gd.RunGravityModel(trip_purpose=1, a=None, b=None, c=None)
