@@ -34,7 +34,7 @@ gd.GetNodeDemand()
 gd.ProduceAccessMatrix(latitude=30)
 # users can customize the latitude of the area of interest and accessibility.csv
 
-"Step 6: Apply Gravity Model to Conduct Trip Distribution"
+"Step 6: Apply Gravity Model to Perform Trip Distribution"
 gd.RunGravityModel(trip_purpose=1, a=None, b=None, c=None)
 # users can customize friction factor coefficients under a specific trip purpose
 
