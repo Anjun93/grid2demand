@@ -21,7 +21,7 @@ gd.ReadNetworkFiles()
 
 "Step 2: Partition Grid into cells"
 gd.PartitionGrid(number_of_x_blocks=None, number_of_y_blocks=None, cell_width=1000, cell_height=1000, latitude=30)
-# users can customize number of grid cells or cell's width and height in meter
+# users can customize number of grid cells or cell's width and height in meters
 
 "Step 3: Get Production/Attraction Rates of Each Land Use Type with a Specific Trip Purpose"
 gd.GetPoiTripRate(trip_purpose=1)
