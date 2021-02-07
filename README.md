@@ -28,11 +28,12 @@ gd.GetPoiTripRate(trip_purpose=1)
 # users can customize trip purpose and poi_trip_rate.csv
 
 "Step 4: Define Production/Attraction Value of Each Node According to POI Type"
-gd.GetNodeDemand()
+gd.GetNodeDemand(residential_production=20, residential_attraction=20, boundary_production=1000, boundary_attraction=1000)
+# users can customize production and attraction values of residential nodes and boundary nodes
 
 "Step 5: Calculate Zone-to-zone Accessibility Matrix by Centroid-to-centroid Straight Distance"
 gd.ProduceAccessMatrix(latitude=30)
-# users can customize the latitude of the area of interest and accessibility.csv
+# users need to input the latitude of the area of interest for calculating accessibility
 
 "Step 6: Apply Gravity Model to Perform Trip Distribution"
 gd.RunGravityModel(trip_purpose=1, a=None, b=None, c=None)
