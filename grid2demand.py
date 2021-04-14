@@ -17,7 +17,6 @@ import pandas as pd
 import numpy as np
 import math
 import csv
-import re
 import locale
 import sys
 from pprint import pprint
@@ -30,9 +29,10 @@ from random import choice
 class Node:
     def __init__(self):
         self.id = 0
-        self.zone_id = '' 
+        self.zone_id = None
         # commments: default is 0, or no value; only three conditions for a node to become an activity node
         # and zone_id != 0: 1) POI node, 2) is_boundary node(freeway) 3) residential in activity_type 
+        self.node_type = ''
         self.x_coord = 0
         self.y_coord = 0
         self.production = 0 # commments: = 0 (current node is not poi node)
@@ -42,6 +42,7 @@ class Node:
         # if current node is poi ndoe
         self.activity_type = '' # commments: provided from osm2gmns such as motoway, residential, ...
         self.activity_location_tab = ''
+        self.osm_node_id = ''
 
 
 class POI:
@@ -67,9 +68,19 @@ class Zone: # comments: area of grid zone
         self.y_max = 0
         self.y_min = 0
         self.poi_count = 0 # comments: total poi counts in this zone
+        self.residential_count = 0  # number of residential poi nodes in the zone
+        self.office_count = 0  # number of office poi nodes in the zone
+        self.shopping_count = 0  # number of shopping poi nodes in the zone
+        self.school_count = 0  # number of school poi nodes in the zone
+        self.parking_count = 0  # number of parking poi nodes in the zone
+        self.boundary_count = 0  # number of boundary nodes in the zone
         self.node_id_list = [] # comments: nodes which belong to this zone
         self.poi_id_list = [] # comments: poi points which belong to this zone
+        self.poi_node_list = []
         self.polygon = '' # comments: study area boundary based on wkt format
+
+        self.connector_list = []
+        self.centroid_node = None
 
 
 class Agent:
@@ -89,6 +100,16 @@ class Agent:
         self.b_generated = False
         self.b_complete_trip = False
 
+class Link:
+    def __init__(self, link_id, from_node_id, to_node_id, link_type_name, link_type_id):
+        """ the attribute of link """
+        self.link_id = link_id
+        self.from_node_id = from_node_id
+        self.to_node_id = to_node_id
+        self.link_type_name = link_type_name
+        self.link_type_id = link_type_id
+        self.geometry = None
+
 
 # create a logger
 logger = logging.getLogger()
@@ -104,12 +125,16 @@ g_poi_id_area_dict = {}
 g_outside_boundary_node_id_index = {}
 g_output_folder = ''
 g_node_id_to_node = {}
+g_node_id_to_index = {}
+g_poi_map = {}
+g_average_latitude = 0
 
 
 def ReadNetworkFiles(input_folder=None):
     global g_poi_id_type_dict
     global g_poi_id_area_dict
     global g_output_folder
+    global g_average_latitude
 
     if input_folder:
         node_filepath = os.path.join(input_folder, 'node.csv')
@@ -145,11 +170,13 @@ def ReadNetworkFiles(input_folder=None):
         exclude_boundary_node_index = 0
         poi_flag = 0
         log_flag = 0
+        index = 0
         for line in reader:
             node = Node()
             node_id = line['node_id']
             if node_id:
                 node.id = int(node_id)
+                g_node_id_to_index[node.id] = index
             else:
                 # print('Error: node_id is not defined in node.csv, please check it!')
                 logger.error("node_id is not defined in node.csv, please check it!")
@@ -157,7 +184,7 @@ def ReadNetworkFiles(input_folder=None):
 
             osm_node_id = line['osm_node_id']
             if osm_node_id:
-                node.osm_node_id = int(float(osm_node_id))
+                node.osm_node_id = str(osm_node_id)
             else:
                 node.osm_node_id = None
 
@@ -168,6 +195,8 @@ def ReadNetworkFiles(input_folder=None):
                     node.activity_location_tab = 'residential'
                 if node.activity_type == 'poi':
                     node.activity_location_tab = 'poi'
+                if node.activity_type == 'centroid node':
+                    continue
 
             x_coord = line['x_coord']
             if x_coord:
@@ -196,7 +225,7 @@ def ReadNetworkFiles(input_folder=None):
 
             boundary_flag = line['is_boundary']
             if boundary_flag:
-                node.boundary_flag = int(boundary_flag)
+                node.boundary_flag = int(float(boundary_flag))
                 if node.boundary_flag == 1:
                     node.activity_location_tab = 'boundary'
             else:
@@ -212,15 +241,25 @@ def ReadNetworkFiles(input_folder=None):
                 g_outside_boundary_node_list.append(node) # comments: outside boundary node
                 g_outside_boundary_node_id_index[node.id] = exclude_boundary_node_index
                 exclude_boundary_node_index += 1
+
+            index += 1
+
         if poi_flag == 0: 
             if (log_flag == 0):
-                print('field poi_id is not in node.csv. Please check it!') 
-                logger.warning('field poi_id is NOT defined in node.csv. Please check node.csv! \
+                print('Field poi_id is not in node.csv. Please check it!')
+                logger.warning('Field poi_id is NOT defined in node.csv. Please check node.csv! \
                     It could lead to empty demand volume and zero agent. \
                     Please ensure to POIs=True in osm2gmns: \
                     net = og.getNetFromOSMFile')
                 log_flag = 1
 
+        try:
+            g_latitude_list = [node.y_coord for node in g_node_list]
+            g_average_latitude = sum(g_latitude_list) / len(g_latitude_list)
+        except:
+            g_average_latitude = 99
+            print('Please check y_coord in node.csv!')
+            logger.warning('Please check y_coord in node.csv!')
 
     with open(poi_filepath, errors='ignore') as fp:
         reader = csv.DictReader(fp)
@@ -285,6 +324,8 @@ def ReadNetworkFiles(input_folder=None):
             g_poi_id_type_dict[poi.id] = poi.type
             g_poi_list.append(poi)
 
+            g_poi_map[poi.id] = g_poi_list.index(poi)
+
     logger.debug('Ending ReadNetworkFiles')
 
 
@@ -312,7 +353,8 @@ def PartitionGrid(number_of_x_blocks=None,
                   number_of_y_blocks=None,
                   cell_width=None,
                   cell_height=None,
-                  latitude=None):
+                  latitude=None,
+                  connector=True):
     logger.debug('Starting PartitionGrid')
 
     # Error: Given grid scales and number of blocks simultaneously
@@ -326,6 +368,7 @@ def PartitionGrid(number_of_x_blocks=None,
     global g_zone_index_dict
     global g_node_zone_dict
     global g_used_latitude
+    global g_average_latitude
 
     # initialize parameters
     x_max = max(node.x_coord for node in g_outside_boundary_node_list)
@@ -333,21 +376,34 @@ def PartitionGrid(number_of_x_blocks=None,
     y_max = max(node.y_coord for node in g_outside_boundary_node_list)
     y_min = min(node.y_coord for node in g_outside_boundary_node_list)
 
-    if latitude is None:
-        latitude = 30  # comments: default value if no given latitude value
-        flat_length_per_degree_km = g_degree_length_dict[latitude]
-        g_used_latitude = latitude
-        logger.warning('Latitude is not defined for network partition. Default latitude is 30 degree!')
-
-    else:
+    if latitude is None:  # use the average latitude according to node.csv
+        if g_average_latitude == 99:
+            latitude = 30  # comments: default value if no given latitude value
+            flat_length_per_degree_km = g_degree_length_dict[latitude]
+            g_used_latitude = latitude
+            logger.warning('Please check y_coord in node.csv! Default latitude is 30 degree!')
+        else:
+            # match the closest latitude key according to the given latitude
+            dif = float('inf')
+            for i in g_degree_length_dict.keys():
+                if abs(abs(g_average_latitude) - i) < dif:
+                    temp_latitude = i
+                    dif = abs(abs(g_average_latitude) - i)
+                    g_used_latitude = temp_latitude
+            flat_length_per_degree_km = g_degree_length_dict[temp_latitude]
+    else:  # use the given latitude
         # match the closest latitude key according to the given latitude
         dif = float('inf')
         for i in g_degree_length_dict.keys():
-            if abs(latitude - i) < dif:
+            if abs(abs(latitude) - i) < dif:
                 temp_latitude = i
-                dif = abs(latitude - i)
+                dif = abs(abs(latitude) - i)
                 g_used_latitude = temp_latitude
         flat_length_per_degree_km = g_degree_length_dict[temp_latitude]
+
+
+    print('\nLatitude used for grid partition = ', g_used_latitude)
+    logger.info('Latitude used for grid partition = ' + str(g_used_latitude))
 
     # Case 0: Default
     if (number_of_x_blocks is None) and (number_of_y_blocks is None) \
@@ -409,10 +465,30 @@ def PartitionGrid(number_of_x_blocks=None,
                 poi.zone_id = str(block.id)
                 g_poi_zone_dict[poi.id] = block.id
                 block.poi_id_list.append(poi.id)
+                block.poi_node_list.append(poi)
 
         # get centroid coordinates of each zone with nodes by calculating average x_coord and y_coord
         if len(block.node_id_list) != 0:
-            block.poi_count = len(block.poi_id_list)
+            block.poi_count = len(block.poi_id_list)  # number of all poi nodes in the zone
+            block.residential_count = 0  # number of residential poi nodes in the zone
+            block.office_count = 0  # number of office poi nodes in the zone
+            block.shopping_count = 0  # number of shopping poi nodes in the zone
+            block.school_count = 0  # number of school poi nodes in the zone
+            block.parking_count = 0  # number of parking poi nodes in the zone
+
+            for poi in block.poi_node_list:
+                if poi.type == 'apartments' or poi.type == 'dormitory' or poi.type == 'house' or poi.type == 'residential':
+                    block.residential_count += 1  # number of residential poi nodes in the zone
+                elif poi.type == 'office' or poi.type == 'industrial':
+                    block.office_count += 1  # number of office poi nodes in the zone
+                elif poi.type == 'commercial' or poi.type == 'retail' or poi.type == 'supermarket' or poi.type == 'warehouse':
+                    block.shopping_count += 1
+                elif poi.type == 'school' or poi.type == 'kindergarten' or poi.type == 'university' \
+                    or poi.type == 'college' or poi.type == 'university;yes':
+                    block.school_count += 1
+                elif poi.type == 'parking' or poi.type == 'garage' or poi.type == 'garages' or poi.type == 'bicycle_parking':
+                    block.parking_count += 1  # number of parking poi nodes in the zone
+
             block.centroid_x = sum(g_outside_boundary_node_list[g_outside_boundary_node_id_index[node_id]].x_coord for
                                    node_id in block.node_id_list) / len(block.node_id_list)
             block.centroid_y = sum(g_outside_boundary_node_list[g_outside_boundary_node_id_index[node_id]].y_coord for
@@ -434,11 +510,26 @@ def PartitionGrid(number_of_x_blocks=None,
 
             str_centroid = 'POINT (' + str(block.centroid_x) + ' ' + str(block.centroid_y) + ')'
             block.centroid = str_centroid
+
+
+            centroid_node = Node()
+            centroid_node.id = 100000 + block.id
+            centroid_node.zone_id = block.id
+            centroid_node.x_coord = block.centroid_x
+            centroid_node.y_coord = block.centroid_y
+            centroid_node.node_type = 'centroid node'
+            block.centroid_node = centroid_node
             g_zone_list.append(block)
+
 
         # centroid of each zone with zero node is the center point of the grid
         if (len(block.node_id_list) == 0):
-            block.poi_count = len(block.poi_id_list)
+            block.poi_count = 0  # number of all poi nodes in the zone
+            block.residential_count = 0  # number of residential poi nodes in the zone
+            block.office_count = 0  # number of office poi nodes in the zone
+            block.shopping_count = 0  # number of shopping poi nodes in the zone
+            block.school_count = 0  # number of school poi nodes in the zone
+            block.parking_count = 0  # number of parking poi nodes in the zone
             block.centroid_x = (block.x_max + block.x_min) / 2
             block.centroid_y = (block.y_max + block.y_min) / 2
             str_name_a = str(alphabet_list[math.ceil(block.id / number_of_x_blocks) - 1])
@@ -458,7 +549,17 @@ def PartitionGrid(number_of_x_blocks=None,
 
             str_centroid = 'POINT (' + str(block.centroid_x) + ' ' + str(block.centroid_y) + ')'
             block.centroid = str_centroid
+
+            centroid_node = Node()
+            centroid_node.id = 100000 + block.id
+            centroid_node.zone_id = block.id
+            centroid_node.x_coord = block.centroid_x
+            centroid_node.y_coord = block.centroid_y
+            centroid_node.node_type = 'centroid node'
+            block.centroid_node = centroid_node
             g_zone_list.append(block)
+
+
 
         if round(abs(x_temp + scale_x - x_max) / scale_x) >= 1:
             x_temp = x_temp + scale_x
@@ -484,6 +585,7 @@ def PartitionGrid(number_of_x_blocks=None,
         block.centroid = 'POINT (' + str(block.centroid_x) + ' ' + str(block.centroid_y) + ')'
         block.polygon = ''
         block.poi_id_list = []
+        block.boundary_count = 0
         for node in g_boundary_node_list:
             if abs(node.x_coord - x_min) == min(abs(node.x_coord - x_max), abs(node.x_coord - x_min),
                                                 abs(node.y_coord - y_max), abs(node.y_coord - y_min)) \
@@ -491,7 +593,17 @@ def PartitionGrid(number_of_x_blocks=None,
                 node.zone_id = str(block.id)
                 g_node_zone_dict[node.id] = block.id
                 block.node_id_list.append(node.id)
+                block.boundary_count += 1
+
+        centroid_node = Node()
+        centroid_node.id = 100000 + block.id
+        centroid_node.zone_id = block.id
+        centroid_node.x_coord = block.centroid_x
+        centroid_node.y_coord = block.centroid_y
+        centroid_node.node_type = 'centroid node'
+        block.centroid_node = centroid_node
         g_zone_list.append(block)
+
         delta_y += scale_y
         i += 1
 
@@ -511,6 +623,7 @@ def PartitionGrid(number_of_x_blocks=None,
         block.centroid = 'POINT (' + str(block.centroid_x) + ' ' + str(block.centroid_y) + ')'
         block.polygon = ''
         block.poi_id_list = []
+        block.boundary_count = 0
         for node in g_boundary_node_list:
             if abs(node.y_coord - y_max) == min(abs(node.x_coord - x_max), abs(node.x_coord - x_min),
                                                 abs(node.y_coord - y_max), abs(node.y_coord - y_min)) \
@@ -518,7 +631,17 @@ def PartitionGrid(number_of_x_blocks=None,
                 node.zone_id = str(block.id)
                 g_node_zone_dict[node.id] = block.id
                 block.node_id_list.append(node.id)
+                block.boundary_count += 1
+
+        centroid_node = Node()
+        centroid_node.id = 100000 + block.id
+        centroid_node.zone_id = block.id
+        centroid_node.x_coord = block.centroid_x
+        centroid_node.y_coord = block.centroid_y
+        centroid_node.node_type = 'centroid node'
+        block.centroid_node = centroid_node
         g_zone_list.append(block)
+
         i += 1
         delta_x += scale_x
 
@@ -538,6 +661,7 @@ def PartitionGrid(number_of_x_blocks=None,
         block.centroid = 'POINT (' + str(block.centroid_x) + ' ' + str(block.centroid_y) + ')'
         block.polygon = ''
         block.poi_id_list = []
+        block.boundary_count = 0
         for node in g_boundary_node_list:
             if abs(node.x_coord - x_max) == min(abs(node.x_coord - x_max), abs(node.x_coord - x_min),
                                                 abs(node.y_coord - y_max), abs(node.y_coord - y_min)) \
@@ -545,7 +669,17 @@ def PartitionGrid(number_of_x_blocks=None,
                 node.zone_id = str(block.id)
                 g_node_zone_dict[node.id] = block.id
                 block.node_id_list.append(node.id)
+                block.boundary_count += 1
+
+        centroid_node = Node()
+        centroid_node.id = 100000 + block.id
+        centroid_node.zone_id = block.id
+        centroid_node.x_coord = block.centroid_x
+        centroid_node.y_coord = block.centroid_y
+        centroid_node.node_type = 'centroid node'
+        block.centroid_node = centroid_node
         g_zone_list.append(block)
+
         i += 1
         delta_y += scale_y
 
@@ -565,6 +699,7 @@ def PartitionGrid(number_of_x_blocks=None,
         block.centroid = 'POINT (' + str(block.centroid_x) + ' ' + str(block.centroid_y) + ')'
         block.polygon = ''
         block.poi_id_list = []
+        block.boundary_count = 0
         for node in g_boundary_node_list:
             if abs(node.y_coord - y_min) == min(abs(node.x_coord - x_max), abs(node.x_coord - x_min),
                                                 abs(node.y_coord - y_max), abs(node.y_coord - y_min)) \
@@ -572,7 +707,17 @@ def PartitionGrid(number_of_x_blocks=None,
                 node.zone_id = str(block.id)
                 g_node_zone_dict[node.id] = block.id
                 block.node_id_list.append(node.id)
+                block.boundary_count += 1
+
+        centroid_node = Node()
+        centroid_node.id = 100000 + block.id
+        centroid_node.zone_id = block.id
+        centroid_node.x_coord = block.centroid_x
+        centroid_node.y_coord = block.centroid_y
+        centroid_node.node_type = 'centroid node'
+        block.centroid_node = centroid_node
         g_zone_list.append(block)
+
         i += 1
         delta_x += scale_x
 
@@ -580,10 +725,64 @@ def PartitionGrid(number_of_x_blocks=None,
     print('\nNumber of zones including virtual zones = ' + str(g_number_of_zones))
     logger.info('Number of zones including virtual zones = ' + str(g_number_of_zones))
     g_zone_id_list = [zone.id for zone in g_zone_list]
+
     # get zone index
     for i in range(g_number_of_zones):
         g_zone_index_dict[g_zone_id_list[i]] = i
 
+    # generate the connector
+    for block in g_zone_list:
+        centroid_node = block.centroid_node
+
+        link_id_temp = 0
+        for node_id in block.node_id_list:
+            if (link_id_temp < 50):
+                if (g_node_list[g_node_id_to_index[node_id]].activity_location_tab in ['residential', 'boundary', 'poi']):
+
+                    connector_link = Link(link_id = block.id * 100000 + link_id_temp,
+                                        from_node_id = node_id,
+                                        to_node_id = centroid_node.id,
+                                        link_type_name = 'connector with ' +
+                                                         g_node_list[g_node_id_to_index[node_id]].activity_location_tab,
+                                        link_type_id = -1)
+
+                    connector_link.geometry = 'LINESTRING (' + \
+                                            str(g_node_list[g_node_id_to_index[node_id]].x_coord) + ' ' + \
+                                            str(g_node_list[g_node_id_to_index[node_id]].y_coord) + ' ' + ',' + \
+                                            str(centroid_node.x_coord) + ' ' + \
+                                            str(centroid_node.y_coord) + ')' 
+                    
+                    block.connector_list.append(connector_link)
+                    link_id_temp = link_id_temp + 1
+            else:
+                break
+
+        
+
+    with open('connector.csv', 'w', newline='') as outfile:
+        writer = csv.writer(outfile)
+        line = ['name','link_id','osm_way_id','from_node_id','to_node_id','dir_flag','length','lanes','free_speed',\
+            'capacity','link_type_name','link_type','geometry','allowed_uses','from_biway']
+        writer.writerow(line)
+
+        for block in g_zone_list:
+            for connector_link in block.connector_list:
+                line = [ \
+                        '', # name
+                        connector_link.link_id, # link_id
+                        '', # osm_way_id
+                        connector_link.from_node_id, # from_node_id
+                        connector_link.to_node_id, # to_node_id
+                        '', # dir_flag
+                        '', # length
+                        '', # lanes
+                        '', # free_speed
+                        '', # capacity
+                        connector_link.link_type_name, # link_type_name
+                        connector_link.link_type_id, # link_type
+                        connector_link.geometry # geometry
+                ]
+                writer.writerow(line)
 
     # update poi.csv with zone_id
     local_encoding = locale.getdefaultlocale()
@@ -595,7 +794,7 @@ def PartitionGrid(number_of_x_blocks=None,
             data = pd.read_csv(poi_filepath, encoding=local_encoding[1])
         data_list = [poi.zone_id for poi in g_poi_list]
         data1 = pd.DataFrame(data_list)
-        data['zone_id'] = data1
+        data['activity_zone_id'] = data1
         data_list = [poi.area for poi in g_poi_list]
         data1 = pd.DataFrame(data_list)
         data['area'] = data1
@@ -609,14 +808,14 @@ def PartitionGrid(number_of_x_blocks=None,
             data = pd.read_csv('poi.csv', encoding=local_encoding[1])
         data_list = [poi.zone_id for poi in g_poi_list]
         data1 = pd.DataFrame(data_list)
-        data['zone_id'] = data1
+        data['activity_zone_id'] = data1
         # print(data)
         data.to_csv('poi.csv', index=False, line_terminator='\n')
 
     # create zone.csv
     data_list = [zone.id for zone in g_zone_list]
     data_zone = pd.DataFrame(data_list)
-    data_zone.columns = ["zone_id"]
+    data_zone.columns = ["activity_zone_id"]
 
     data_list = [zone.name for zone in g_zone_list]
     data1 = pd.DataFrame(data_list)
@@ -640,7 +839,31 @@ def PartitionGrid(number_of_x_blocks=None,
 
     data_list = [zone.poi_count for zone in g_zone_list]
     data1 = pd.DataFrame(data_list)
-    data_zone['poi_count'] = data1
+    data_zone['total_poi_count'] = data1
+
+    data_list = [zone.residential_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['residential_poi_count'] = data1
+
+    data_list = [zone.office_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['office_poi_count'] = data1
+
+    data_list = [zone.shopping_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['shopping_poi_count'] = data1
+
+    data_list = [zone.school_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['school_poi_count'] = data1
+
+    data_list = [zone.parking_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['parking_poi_count'] = data1
+
+    data_list = [zone.boundary_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['boundary_node_count'] = data1
 
     # print(data_zone)
     if g_output_folder is not None:
@@ -650,6 +873,8 @@ def PartitionGrid(number_of_x_blocks=None,
         data_zone.to_csv('zone.csv', index=False, line_terminator='\n')
 
     logger.debug("Ending Partition Grid")
+
+
 
 
 """PART 3  TRIP GENERATION"""
@@ -717,24 +942,44 @@ def GetPoiTripRate(trip_rate_folder=None,
         # default trip generation rates refer to ITE Trip Generation Manual, 10t Edition
         # https://www.troutdaleoregon.gov/sites/default/files/fileattachments/public_works/page/966/ite_land_use_list_10th_edition.pdf
         # unit of measure for all poi nodes is 1,000 SF GFA in this version
-        g_poi_purpose_prod_dict = {'library': {trip_purpose_list[0]: 8.16}, 'university': {trip_purpose_list[0]: 1.17},
-                                   'office': {trip_purpose_list[0]: 2.04}, 'arts_centre': {trip_purpose_list[0]: 0.18},
+        g_poi_purpose_prod_dict = {'parking': {trip_purpose_list[0]: 0.43},
+                                   'bicycle_parking': {trip_purpose_list[0]: 0.43},
+                                   'digester': {trip_purpose_list[0]: 0.4},
+                                   'service': {trip_purpose_list[0]: 0.48}, 'college': {trip_purpose_list[0]: 1.17},
+                                   'university': {trip_purpose_list[0]: 1.17}, 'school': {trip_purpose_list[0]: 1.37},
                                    'university;yes': {trip_purpose_list[0]: 1.17},
-                                   'bank': {trip_purpose_list[0]: 12.13}, 'childcare': {trip_purpose_list[0]: 11.12},
-                                   'school': {trip_purpose_list[0]: 2.04},
-                                   'public': {trip_purpose_list[0]: 4.79}, 'post_office': {trip_purpose_list[0]: 11.21},
-                                   'pharmacy': {trip_purpose_list[0]: 10.29}, 'yes': {trip_purpose_list[0]: 1.15}}
+                                   'kindergarten': {trip_purpose_list[0]: 11.12},
+                                   'transportation': {trip_purpose_list[0]: 1.72},
+                                   'train_station': {trip_purpose_list[0]: 1.72},
+                                   'public': {trip_purpose_list[0]: 0.11},
+                                   'public_building': {trip_purpose_list[0]: 0.11},
+                                   'hospital': {trip_purpose_list[0]: 0.97},
+                                   'government': {trip_purpose_list[0]: 1.71},
+                                   'administrative/auxiliary': {trip_purpose_list[0]: 1.71},
+                                   'fire_station': {trip_purpose_list[0]: 0.48},
+                                   'bakehouse': {trip_purpose_list[0]: 28}, 'temple': {trip_purpose_list[0]: 4.22},
+                                   'synagogue': {trip_purpose_list[0]: 0.49}, 'shrine': {trip_purpose_list[0]: 4.22},
+                                   'religious': {trip_purpose_list[0]: 0.49}, 'mosque': {trip_purpose_list[0]: 4.22},
+                                   'monastery': {trip_purpose_list[0]: 4.22}, 'church': {trip_purpose_list[0]: 0.49},
+                                   'chapel': {trip_purpose_list[0]: 0.49}, 'cathedral': {trip_purpose_list[0]: 0.49},
+                                   'warehouse': {trip_purpose_list[0]: 0.19}, 'retail': {trip_purpose_list[0]: 6.84},
+                                   'supermarket': {trip_purpose_list[0]: 9.24}, 'office': {trip_purpose_list[0]: 1.15},
+                                   'kiosk': {trip_purpose_list[0]: 7.42}, 'industrial': {trip_purpose_list[0]: 0.63},
+                                   'commercial': {trip_purpose_list[0]: 0.63}, 'library': {trip_purpose_list[0]: 1.17},
+                                   'childcare': {trip_purpose_list[0]: 11.12}, 'yes': {trip_purpose_list[0]: 1}}
 
-        g_poi_purpose_attr_dict = {'parking': {trip_purpose_list[0]: 2.39}, 'apartments': {trip_purpose_list[0]: 0.48},
-                                   'motorcycle_parking': {trip_purpose_list[0]: 2.39},
-                                   'theatre': {trip_purpose_list[0]: 6.17}, 'restaurant': {trip_purpose_list[0]: 7.80},
-                                   'cafe': {trip_purpose_list[0]: 36.31}, 'bar': {trip_purpose_list[0]: 7.80},
-                                   'bicycle_parking': {trip_purpose_list[0]: 2.39},
-                                   'residential': {trip_purpose_list[0]: 0.48},
-                                   'commercial': {trip_purpose_list[0]: 3.81}, 'house': {trip_purpose_list[0]: 0.48},
-                                   'stadium': {trip_purpose_list[0]: 0.47}, 'retail': {trip_purpose_list[0]: 6.84},
-                                   'fast_food': {trip_purpose_list[0]: 14.13},
-                                   'yes': {trip_purpose_list[0]: 1.15}}
+        g_poi_purpose_attr_dict = {'apartments': {trip_purpose_list[0]: 0.36}, 'bungalow': {trip_purpose_list[0]: 0.99},
+                                   'cabin': {trip_purpose_list[0]: 0.99}, 'detached': {trip_purpose_list[0]: 0.99},
+                                   'dormitory': {trip_purpose_list[0]: 0.36}, 'ger': {trip_purpose_list[0]: 0.99},
+                                   'hotel': {trip_purpose_list[0]: 0.6}, 'house': {trip_purpose_list[0]: 0.44},
+                                   'residential': {trip_purpose_list[0]: 0.36},
+                                   'semidetached_house': {trip_purpose_list[0]: 0.99},
+                                   'static_caravan': {trip_purpose_list[0]: 0.46},
+                                   'terrace': {trip_purpose_list[0]: 0.44}, 'public': {trip_purpose_list[0]: 0.11},
+                                   'grandstand': {trip_purpose_list[0]: 0.15}, 'pavilion': {trip_purpose_list[0]: 6.29},
+                                   'riding_hall': {trip_purpose_list[0]: 3.45},
+                                   'sports_hall': {trip_purpose_list[0]: 3.45}, 'stadium': {trip_purpose_list[0]: 0.15},
+                                   'yes': {trip_purpose_list[0]: 1}}
 
     # Get POI production/attraction rates of each poi type with a specific trip purpose
     if trip_purpose is None:
@@ -837,16 +1082,16 @@ def GetNodeDemand(residential_production = None, residential_attraction = None,
 
     if residential_production is None:
         logger.warning('Production value of residential nodes is not defined! Default value is 10.')
-        residential_production = 10  # comments: default value if no given latitude
+        residential_production = 10  # comments: default value if no given residential_production
     if residential_attraction is None:
         logger.warning('Attraction value of residential nodes is not defined! Default value is 10.')
-        residential_attraction = 10  # comments: default value if no given latitude
+        residential_attraction = 10  # comments: default value if no given residential_attraction
     if boundary_production is None:
         logger.warning('Production value of boundary nodes is not defined! Default value is 1000.')
-        boundary_production = 1000  # comments: default value if no given latitude
+        boundary_production = 1000  # comments: default value if no given boundary_production
     if boundary_attraction is None:
         logger.warning('Attraction value of boundary nodes is not defined! Default value is 1000.')
-        boundary_attraction = 1000  # comments: default value if no given latitude
+        boundary_attraction = 1000  # comments: default value if no given boundary_attraction
 
     # calculate production/attraction values of each node
     log_flag = 0
@@ -901,11 +1146,26 @@ def GetNodeDemand(residential_production = None, residential_attraction = None,
             data = pd.read_csv(node_filepath, encoding=local_encoding[1])
         data_list = [node.zone_id for node in g_node_list]
         data1 = pd.DataFrame(data_list)
-        data['zone_id'] = data1
+        data['activity_zone_id'] = data1
         data['production'] = pd.DataFrame(g_node_prod_list)
         data['attraction'] = pd.DataFrame(g_node_attr_list)
         data['activity_location_tab'] = pd.DataFrame([node.activity_location_tab for node in g_node_list])
+        
+        for block in g_zone_list:
+            centroid_node = block.centroid_node
+            series = pd.Series({"node_id": int(centroid_node.id),   
+                                "zone_id": int(centroid_node.zone_id),
+                                "x_coord": centroid_node.x_coord,
+                                "y_coord": centroid_node.y_coord,
+                                "activity_type": centroid_node.node_type
+                                })
+            name = int(centroid_node.id)
+            try:
+                data.loc[name] = series
+            except:
+                data = data.append(series)
         # print(data)
+
         data.to_csv(node_filepath, index=False, line_terminator='\n')
 
     else:
@@ -915,7 +1175,7 @@ def GetNodeDemand(residential_production = None, residential_attraction = None,
             data = pd.read_csv('node.csv', encoding=local_encoding[1])
         data_list = [node.zone_id for node in g_node_list]
         data1 = pd.DataFrame(data_list)
-        data['zone_id'] = data1
+        data['activity_zone_id'] = data1
         data['production'] = pd.DataFrame(g_node_prod_list)
         data['attraction'] = pd.DataFrame(g_node_attr_list)
         # print(data)
@@ -944,28 +1204,37 @@ def ProduceAccessMatrix(latitude=None, accessibility_folder=None):
     global g_distance_matrix
     global g_output_folder
     global g_used_latitude
+    global g_average_latitude
 
     g_distance_matrix = np.ones((g_number_of_zones, g_number_of_zones)) * 9999  # initialize distance matrix
 
-    if latitude is None:
-        # print('Warning: Latitude is not defined for producing accessibility matrix. Default latitude is 30 degree!')
-        logger.warning('Latitude is not defined for producing accessibility matrix! Default latitude is 30 degree.')
-        latitude = 30  # comments: default value if no given latitude
-        flat_length = g_degree_length_dict[latitude]
-        g_used_latitude = latitude
-
-    else:
+    if latitude is None:  # use the average latitude according to node.csv
+        if g_average_latitude == 99:
+            logger.warning('Please check y_coord in node.csv! Default latitude is 30 degree!')
+            latitude = 30  # comments: default value if no given latitude
+            flat_length = g_degree_length_dict[latitude]
+            g_used_latitude = latitude
+        else:
+            # match the closest latitude key according to the given latitude
+            dif = float('inf')
+            for i in g_degree_length_dict.keys():
+                if abs(abs(g_average_latitude) - i) < dif:
+                    temp_latitude = i
+                    dif = abs(abs(g_average_latitude) - i)
+                    g_used_latitude = temp_latitude
+            flat_length = g_degree_length_dict[temp_latitude]
+    else:  # use the given latitude
         # match the closest latitude key according to the given latitude
         dif = float('inf')
         for i in g_degree_length_dict.keys():
-            if abs(latitude - i) < dif:
+            if abs(abs(latitude) - i) < dif:
                 temp_latitude = i
-                dif = abs(latitude - i)
+                dif = abs(abs(latitude) - i)
                 g_used_latitude = temp_latitude
         flat_length = g_degree_length_dict[temp_latitude]
 
-    print('\nLatitude used for grid2demand = ', g_used_latitude)
-    logger.info('Latitude used for grid2demand = ' + str(g_used_latitude))
+    print('\nLatitude used for calculating accessibility = ', g_used_latitude)
+    logger.info('Latitude used for calculating accessibility = ' + str(g_used_latitude))
 
     # define accessibility by calculating straight distance between zone centroids
     if accessibility_folder:
@@ -1049,10 +1318,13 @@ def RunGravityModel(trip_purpose=None, a=None, b=None, c=None):
     global g_trip_matrix
     global g_output_folder
 
-    if trip_purpose == None and a == None and b == None and c == None:  # default values of friction factor coefficients for Purpose 1 (HBW)
-        a = 28507
-        b = -0.02
-        c = -0.123
+    if trip_purpose == None:  # default values of friction factor coefficients for Purpose 1 (HBW)
+        if a == None:
+            a = 28507
+        if b == None:
+            b = -0.02
+        if c == None:
+            c = -0.123
 
         logger.warning('Trip purpose is not defined! Default trip purpose is Purpose 1.')
         print('\nDefault values of friction factor coefficients under trip purpose 1:', '\na=', a, '\nb=', b,
@@ -1060,30 +1332,39 @@ def RunGravityModel(trip_purpose=None, a=None, b=None, c=None):
         logger.info(
             'Default values of friction factor coefficients under trip purpose 1: \na=' + str(a) + '\nb=' + str(b) +
             '\nc=' + str(c))
-    if trip_purpose == 1 and a == None and b == None and c == None:  # default values of friction factor coefficients for Purpose 1
-        a = 28507
-        b = -0.02
-        c = -0.123
+    if trip_purpose == 1:  # default values of friction factor coefficients for Purpose 1
+        if a == None:
+            a = 28507
+        if b == None:
+            b = -0.02
+        if c == None:
+            c = -0.123
 
         print('\nDefault values of friction factor coefficients under trip purpose 1:', '\na=', a, '\nb=', b,
               '\nc=', c)
         logger.info(
             'Default values of friction factor coefficients under trip purpose 1: \na=' + str(a) + '\nb=' + str(b) +
             '\nc=' + str(c))
-    if trip_purpose == 2 and a == None and b == None and c == None:  # default values of friction factor coefficients for Purpose 2
-        a = 139173
-        b = -1.285
-        c = -0.094
+    if trip_purpose == 2:  # default values of friction factor coefficients for Purpose 2
+        if a == None:
+            a = 139173
+        if b == None:
+            b = -1.285
+        if c == None:
+            c = -0.094
 
         print('\nDefault values of friction factor coefficients under trip purpose 2:', '\na=', a, '\nb=', b,
               '\nc=', c)
         logger.info(
             'Default values of friction factor coefficients under trip purpose 2: \na=' + str(a) + '\nb=' + str(b) +
             '\nc=' + str(c))
-    if trip_purpose == 3 and a == None and b == None and c == None:  # default values of friction factor coefficients for Purpose 3
-        a = 219113
-        b = -1.332
-        c = -0.1
+    if trip_purpose == 3:  # default values of friction factor coefficients for Purpose 3
+        if a == None:
+            a = 219113
+        if b == None:
+            b = -1.332
+        if c == None:
+            c = -0.1
 
         print('\nDefault values of friction factor coefficients under trip purpose 3:', '\na=', a, '\nb=', b,
               '\nc=', c)
@@ -1169,7 +1450,21 @@ def RunGravityModel(trip_purpose=None, a=None, b=None, c=None):
     volume_list = []
     for i in range(len(o_zone_id_list)):
         od_volume = g_trip_matrix[g_zone_index_dict[o_zone_id_list[i]]][g_zone_index_dict[d_zone_id_list[i]]]
-        volume_list.append(od_volume)
+        volume_list.append(math.ceil(od_volume))
+
+    # By Entai 2021/4/11
+    print('\nTop 10 O-D Volume:')
+    od_id = [i for i in range(0, len(volume_list))]
+    volume_idx=sorted(enumerate(volume_list), key=lambda od_id:od_id[1], reverse = True)
+    for od in range(0,10):
+        index_truple = volume_idx[od]
+        print('Top ' + str(od+1) + ' O/D pair: '+ \
+            'zone ' + str(o_zone_id_list[index_truple[0]]) + '->zone ' + str(d_zone_id_list[index_truple[0]]) + \
+                ', volume = ' + str(volume_idx[od][1]))
+        logger.info('Top ' + str(od+1) + ' O/D pair: '+ \
+            'zone ' + str(o_zone_id_list[index_truple[0]]) + '->zone ' + str(d_zone_id_list[index_truple[0]]) + \
+                ', volume = ' + str(volume_idx[od][1]))
+
 
     data = pd.DataFrame(o_zone_id_list)
     data.columns = ["o_zone_id"]
@@ -1196,7 +1491,7 @@ def RunGravityModel(trip_purpose=None, a=None, b=None, c=None):
     # update zone.csv with total production and attraction in each zone
     data_list = [zone.id for zone in g_zone_list]
     data_zone = pd.DataFrame(data_list)
-    data_zone.columns = ["zone_id"]
+    data_zone.columns = ["activity_zone_id"]
 
     data_zone_name_list = [zone.name for zone in g_zone_list]
     data1 = pd.DataFrame(data_zone_name_list)
@@ -1220,7 +1515,31 @@ def RunGravityModel(trip_purpose=None, a=None, b=None, c=None):
 
     data_list = [zone.poi_count for zone in g_zone_list]
     data1 = pd.DataFrame(data_list)
-    data_zone['poi_count'] = data1
+    data_zone['total_poi_count'] = data1
+
+    data_list = [zone.residential_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['residential_poi_count'] = data1
+
+    data_list = [zone.office_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['office_poi_count'] = data1
+
+    data_list = [zone.shopping_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['shopping_poi_count'] = data1
+
+    data_list = [zone.school_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['school_poi_count'] = data1
+
+    data_list = [zone.parking_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['parking_poi_count'] = data1
+
+    data_list = [zone.boundary_count for zone in g_zone_list]
+    data1 = pd.DataFrame(data_list)
+    data_zone['boundary_node_count'] = data1
 
     data_zone['total_production'] = pd.DataFrame(g_total_production_list)
     data_zone['total_attraction'] = pd.DataFrame(g_total_attraction_list)
